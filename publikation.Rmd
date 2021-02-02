@@ -1,0 +1,599 @@
+---
+title: "publikation"
+author: "Gabriel Holz"
+date: "11 Juli 2019"
+output:
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE)
+library(tidyverse)
+library(mgcv)
+library(nlme)
+library(itsadug)
+```
+
+#Einleitung
+#Methode/Ergebnisse
+
+## Datengrundlage
+(...) Beschreibung der Methode generell. 
+
+Die Vegetationstabellen der einzelnen, Jahre wurden nach der Londo-Skala aufgenommen. Die Werte .1; .2; .4 wurden durch 0.1; 0.2; 0.4 ersetzt, somit wurde mit der prozentualen Deckung gerechnet. Die Vegetationstabelle ist wie folgt aufgebaut: Jede Spalte ist eine Art, jede Zeile eine Probefläche und jede Zelle ein Deckungsgrad. Die Angaben der Umweltvariablen, wie zum Beispiel die Beweidungsdauer, so wie die Diversitätsmaße und die Jahresangaben wurden in einer separaten Tabelle gespeichert.  
+
+```{r data_import, include=FALSE}
+#table import:
+source("union_data.R")
+
+#remove empty row:
+arten <- arten[-68,]
+variablen <- variablen[-68,]
+treat_art1 <- arten %>% 
+  dplyr::select(-treat_id, -nutrient) #remove treat_id
+  
+#get id from valid spec.
+wert_id <- read.csv("wert_id.csv") %>% 
+  mutate(Artname = gsub(" ", ".", Artname)) %>% 
+  dplyr::filter(Artname %in% colnames(treat_art1)) 
+    
+  
+#Auswählen von den wertgebenden Arten und den Störzeigern:
+treat_art <- treat_art1 %>% 
+  dplyr::select(wert_id$Artname)
+
+#Shannon Index errechen:
+shannon_index <- treat_art %>% 
+  vegan::diversity()
+  
+#beta Diversität berechnen:
+
+beta_div <- vegan::vegdist(log(treat_art + 1), method="bray")
+  
+mat = as.matrix(beta_div)
+beta_div1 <- c(NA, mat[row(mat) == col(mat) + 1])
+
+#alpha Diversität berechenen für Störzeiger und allen weiteren Arten:
+
+stoer1 <- wert_id %>% 
+  dplyr::filter(wert_id !=1)
+
+alpha1 <- treat_art %>% 
+  dplyr::select(stoer1$Artname) %>% 
+  vegan::specnumber()
+
+stoer2 <- wert_id %>% 
+  dplyr::filter(wert_id ==1)
+
+alpha2 <- treat_art %>% 
+  dplyr::select(stoer2$Artname) %>% 
+  vegan::specnumber()
+
+#Beta diversität für die Beweidung berechnen:
+env_dist <- variablen %>% 
+  dplyr::select(Kälber, Mutterkuh, Ziege, Zicklein, 
+        Jungstute_hengst, Stuten, Esel, Hund, Schaf, Hengst)
+
+mat1 <- as.matrix(vegan::vegdist(env_dist, method="bray"))
+env_dist1 <- c(NA, mat1[row(mat1) == col(mat1) + 1])
+
+#Diversitäts Maße und Variablen zur Modelltabelle hinzufügen:
+mod_tab <- variablen %>% 
+  dplyr::mutate(shanno = shannon_index,
+          alpha1 = alpha1,
+          alpha2 = alpha2,
+          beta1 = beta_div1) %>% 
+    dplyr::mutate(beta1 = ifelse(Jahr == 2010, NA, beta1)) %>% 
+    dplyr::mutate(env_dist = ifelse(Jahr == 2010, NA, env_dist1)) %>% 
+    dplyr::mutate(ni = arten$nutrient) 
+```
+
+```{r plot der Umweltvariablen, echo=FALSE, fig.height=8, fig.width=8}
+#
+#Plot der Umweltvariablen:
+#
+
+env_data1 <- env_data %>% 
+  mutate(cum_year = 365 * (Jahr - 2010)) %>% 
+  mutate(name = c(1:nrow(env_data))) %>% 
+  mutate(from1 = -(as.numeric(Start) - cum_year),
+         to1 = -(as.numeric(Ende) - cum_year))
+
+cord <- soilprofile2::cord_setting(env_data1, plot_width = 2000)
+
+sf_poly <- soilprofile2::sf_polygon(cord) %>% 
+  left_join(env_data1, by = "name") %>% 
+  group_by(name) %>%  
+  mutate(jahrX = Jahr * 10,
+         jahrY = 0) %>% 
+  mutate(geometry = geometry + c(jahrX, jahrY))
+
+sf_poly %>% 
+  ggplot() +
+  geom_sf(aes(fill= GV_proFlaeche)) +
+  facet_grid(.~Ort_id) +
+  scale_x_continuous(
+    labels = parse(text =  as.character(seq(from= 2010, to=2018, by=2)))) +
+  scale_y_continuous(
+    breaks = c(14730, 14761, 14791, 14822, 14853, 14883, 14914, 14944),
+    labels = c("01.Mai", "01.Juni",  "01.Juli", "01.Aug",
+                            "01.Sept", "01.Okt", "01.Nov", "01.Dez"))+ 
+  scale_fill_gradient(low = "green", high = "red") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                   size = 12, hjust = 1),
+        axis.title = element_blank()) +
+  labs(fill = "Großvieheinheit \n pro Fläche")
+```
+
+```{r ArtenundZeit, eval=FALSE, include=FALSE}
+#Arten die sich stark über die Zeit verändern:
+fm_mod <- treat_art %>% 
+  mutate(Jahr = mod_tab$Jahr)
+
+names1 <- "" 
+
+valid_names <- names(fm_mod)[names(fm_mod) != "Jahr"]  # all but group
+for(i in 1:length(valid_names)) {
+  #frm <- as.formula(paste(valid_names[i], "~ Jahr"))
+  fm <- cor(fm_mod$Jahr, fm_mod[i], use = "pairwise.complete.obs")
+  print(fm)
+  #test <- anova(fm)
+  if(abs(fm) > 0.25)
+   names1  <- c(names(fm_mod)[i], names1)
+}
+cor(fm_mod$Jahr, fm_mod$Bellis.perennis, use = "pairwise.complete.obs")
+fm <- gam(Jahr ~ Nardus.stricta, data = fm_mod)
+summary(fm)
+ names1 <-  names1[-c("")]
+fm_mod1 <- treat_art %>% 
+  mutate(Ort = mod_tab$Ort) %>% 
+   mutate(Jahr = mod_tab$Jahr)
+Trifolium.dubium
+fm_mod2 <- reshape2::melt(fm_mod1[,c("Jahr", "Ort", names1)], id=c("Jahr", "Ort"))
+g <- ggplot(fm_mod2, aes(y=value, x=Jahr)) + 
+  geom_point()+
+  geom_smooth()
+g + facet_grid(. ~ variable) 
+```
+
+
+## Alpha-Diversität in Abhängigkeit von der Zeit, der Beweidungsdauer und der Beweidungsintensität
+
+###Methode
+
+Die Alpha-Diversität beschreibt die Artenzahl je Probefläche. Dabei spielt die Abundanz der Arten keine Rolle. Da es aus ökologischer Sicht von Bedeutung ist, welche Arten vorkommen, wurden die Arten in Störzeiger und standorttypische Arten unterteilt (Quelle). Die Alpha-Diversität der standorttypische Arten wurden wie folgt modelliert:
+
+$Artenanzahl_{is} = \alpha_i + \beta + GV_{is} + Dauer_{is} + f_i(Jahr_s) + \epsilon_{s}$
+
+
+Mit den Parametern $Artenanzahl_{is}$ als Wert für die Zeitreihe jedes Ortes $i(i= 1, ...,9)$ für jedes Jahr $s(s = 1, ..., 9)$. Für jeden Ort kann der Y-Abschnitt ($alpha_i$), also der Mittelwert unterschiedlich berechnet werden. $GV_{is}$ ist die Großvieheinheit pro Fläche und die $Dauer_{is}$ beschreibt die Anzahl der Tage an denen beweidet wurde. Mit der Funktion $f_i(Jahr_s)$ kann jede Zeitreihe individuell geglättet werden. Die Varianzen der Zeitreihen wurde optisch analysiert und als gleich eingestuft. Somit hat jede Zeitreihe die gleiche Residuen Ausdehnung. Da es sich bei den Daten um Zeitreihen handelt ist die Annahme der Unabhängigkeit verletzt und somit könnte der p-Wert nicht stimmen. Um dieses Problem zu lösen wurde eine AR-1 Autokorrelationsstruktur implementiert. Dadurch wird die Korrelation zwischen den Residuen der verschiedenen Zeitreihen mit 0 angenommen. Das heisst die Korrelation wird auf der tiefsten Modellebene angewendet. Der p-Wert ist dabei für alle Zeitreihen der selbe. Der AIC-Wert ist für das Modell mit der Autocorrelation um 64 Einheiten besser, was eine große Modellverbesserung ist. Das Modell wurde mit der Funktion “GAMM” aus dem R Paket “mgcv” berechnet.
+Poisson Verteilung in Formel einbauen!!! erklären bs=“cr”, method=“REML”
+
+
+
+
+```{r residuen, include=FALSE}
+#Ist die Varianz homogen? (kommt nicht in die Veröffetlichung)
+lattice::xyplot(alpha1 ~ Jahr | Ort, col = 1, data = mod_tab)
+```
+
+```{r mod1, include=FALSE}
+#run model
+f3 <- formula(alpha1 ~ GV_proFlaeche + Dauer +
+                Ort  + s(Jahr, by = Ort, k = 6, bs="cr"))
+
+fm3 <- mgcv::gamm(f3, data = mod_tab,
+                  control = list(opt = "optim"),
+                  family = poisson,
+                  correlation = nlme::corAR1(form =  ~ Jahr | Ort),
+                  method="REML"
+                  #weights = ~ I(1/Ort)
+                  )
+```
+
+###Ergebnisse
+
+```{r result2, eval=FALSE, include=FALSE}
+erg<-anova(fm3$gam)
+plot(fm3$gam)
+#gamtabs(fm3$gam)
+```
+
+% latex table generated in R 3.4.4 by xtable 1.8-3 package
+% Mon Jul 29 17:35:36 2019
+\begin{table}[ht]
+\centering
+\begin{tabular}{lrrrr}
+   \hline
+A. parametric coefficients & Estimate & Std. Error & t-value & p-value \\ 
+  (Intercept) & 3.2402 & 0.0349 & 92.8501 & $<$ 0.0001 \\ 
+  GV\_proFlaeche & 0.0027 & 0.0013 & 2.1156 & 0.0388 \\ 
+  Dauer & 0.0005 & 0.0004 & 1.0760 & 0.2865 \\ 
+  OrtErnsbach NW & -0.3983 & 0.0284 & -14.0443 & $<$ 0.0001 \\ 
+  OrtErnsbach SO & 0.0177 & 0.0247 & 0.7168 & 0.4765 \\ 
+  OrtErnsbach SW & -0.0371 & 0.0246 & -1.5100 & 0.1366 \\ 
+  OrtMerkenbach Ost & -0.3198 & 0.0280 & -11.4317 & $<$ 0.0001 \\ 
+  OrtMerkenbach West  & 0.0167 & 0.0274 & 0.6086 & 0.5453 \\ 
+  OrtMoosbach Nord & -0.6363 & 0.0256 & -24.8622 & $<$ 0.0001 \\ 
+  OrtMoosbach SW & -0.1211 & 0.0254 & -4.7672 & $<$ 0.0001 \\ 
+  OrtUntertal & -0.0305 & 0.0252 & -1.2083 & 0.2320 \\ 
+   \hline
+B. smooth terms & edf & Ref.df & F-value & p-value \\ 
+  s(Jahr):OrtErnsbach NO & 1.0006 & 1.0006 & 0.2291 & 0.6344 \\ 
+  s(Jahr):OrtErnsbach NW & 2.1062 & 2.1062 & 4.9356 & 0.0121 \\ 
+  s(Jahr):OrtErnsbach SO & 1.0000 & 1.0000 & 2.3225 & 0.1330 \\ 
+  s(Jahr):OrtErnsbach SW & 1.0000 & 1.0000 & 10.8721 & 0.0017 \\ 
+  s(Jahr):OrtMerkenbach Ost & 1.0000 & 1.0000 & 23.9627 & $<$ 0.0001 \\ 
+  s(Jahr):OrtMerkenbach West  & 1.0000 & 1.0000 & 13.5189 & 0.0005 \\ 
+  s(Jahr):OrtMoosbach Nord & 1.0012 & 1.0012 & 4.2370 & 0.0440 \\ 
+  s(Jahr):OrtMoosbach SW & 2.6830 & 2.6830 & 5.7823 & 0.0062 \\ 
+  s(Jahr):OrtUntertal & 1.9159 & 1.9159 & 8.4380 & 0.0030 \\ 
+   \hline
+\end{tabular}
+\caption{ } 
+\label{tab.gam}
+\end{table}
+
+Die Merkenbach Weiden haben einen signifikanten linearen negativen Langzeittrend. Moosbach SW und Untertal Weide zeigen einen nicht ganz so ausgeprägten Trend, welcher nicht linear ist. Ernsbach SW ist dagegen leicht signifikant negativ. Bei den Anderen Weiden ist dagegen keine große Veränderung über die Zeit zu erkennen. Es ist kein Effekt von den Beweidungsdauer auf die Artenzahl zu erkennen. Die Großvieheinheiten haben einen leicht linearen positiven effekt auf die Artenzahl.
+Durch das Mitteln der gefitteten Artenzahlen, kann der generelle Trend über die Zeit dargestellt werden. Hier ist eine leichte Zunahme in den ersten Jahren zu erkennen und dann eine Abnahme, welche sich in den letzten Jahren auf 25 Arten pro Fläche eingependelt hat.
+
+
+
+```{r plot, eval=FALSE, include=FALSE}
+#Wird nicht in die Veröffentlichung genommen:
+
+pred = get_predictions(fm3$gam, 
+                       cond = list(GV_proFlaeche = seq(min(mod_tab$GV_proFlaeche, na.rm=T),
+                                            max(mod_tab$GV_proFlaeche, na.rm=T), 
+                                            length.out = 100),
+                                   Ort = unique(mod_tab$Ort),
+                                   se=T), print.summary = F)
+
+pred = pred %>% mutate(alpha1=1)
+
+pred %>% 
+  group_by(GV_proFlaeche) %>% 
+  summarise(fit = median(fit),
+            CI = max(CI)
+            ) %>% 
+  ggplot(aes(x = GV_proFlaeche, y = exp(fit))) +
+  geom_point(data = mod_tab, aes(GV_proFlaeche, alpha1)) +
+  geom_ribbon(aes(ymin = exp(fit-CI), ymax=exp(fit+CI)),
+              show.legend = F, fill='grey', alpha=.4) +
+  geom_line(col = "darkred") +
+  ylab("Artenanzahl") +
+  theme_bw()
+```
+
+
+```{r plot2, echo=FALSE}
+pred = get_predictions(fm3$gam, 
+                       cond = list(Jahr = seq(min(mod_tab$Jahr, na.rm=T),
+                                            max(mod_tab$Jahr, na.rm=T), 
+                                            length.out = 100),
+                                   Ort = unique(mod_tab$Ort),
+                                   se=T), print.summary = F)
+
+pred = pred %>% mutate(alpha1=1)
+
+pred %>% 
+  group_by(Jahr) %>% 
+  summarise(fit = median(fit),
+            CI = max(CI)
+            ) %>% 
+  ggplot(aes(x = Jahr, y = exp(fit))) +
+  geom_boxplot(data = mod_tab, aes(Jahr, alpha1, group = Jahr)) +
+  geom_ribbon(aes(ymin = exp(fit-CI), ymax=exp(fit+CI)),
+              show.legend = F, fill='grey', alpha=.4) +
+  geom_line(col = "darkred") +
+  theme_bw() +
+  ylab("Artenanzahl")
+```
+
+```{r plot_alpha, eval=FALSE, include=FALSE}
+#kommt nicht in die Veröffentlichung
+plot(fm3$gam)
+```
+###Model Checking
+```{r summary, echo=FALSE}
+pacf(resid(fm3$gam))
+```
+
+```{r check, eval=FALSE, include=FALSE}
+gam.check(fm3$gam)
+
+```
+
+### Beweidungsdauer in Zusammenhang mit den Störzeigern:
+
+Für die Störzeiger wurde ein einfacheres Modell erstellt, da die Anzahl der Arten auf den Probeflächen sehr gering ist und bei vielen Aufnahmen gar keine Störzeiger gezählt wurden. Es wurde die Autokorrelation herausgenommen und einen einfaches GAM mit dem Ort als Random Faktor berechnet. Außerdem wurde die Normalverteilung gewählt, da der QQ-Plot im Modell Check ein besseres Ergebnis zeigte.
+
+###Ergebnisse
+
+```{r result4, include=FALSE}
+
+fm2b <- formula(alpha2 ~ GV_proFlaeche + Dauer + Jahr + s(Ort, bs="re"))
+fm2b <- gam(fm2b, data = mod_tab)
+
+summary(fm2b)
+
+```
+Es ist ein leichter schwach signifikanter Zusammenhang zu erkennen. Sowohl die Großvieheinheiten als auch die Dauer beeinflussen die Anzahl der Störzeiger. Über die Zeit steigen die Störzeiger von durchschnittlich zwei auf drei pro Aufnahme an.
+
+
+
+```{r plot6, echo=FALSE}
+pred = get_predictions(fm2b, 
+                       cond = list(Jahr = seq(min(mod_tab$Jahr, na.rm=T),
+                                            max(mod_tab$Jahr, na.rm=T), 
+                                            length.out = 100),
+                                   Ort = unique(mod_tab$Ort),
+                                   se=T), print.summary = F)
+
+pred = pred %>% mutate(alpha2=1)
+
+pred %>% 
+  group_by(Jahr) %>% 
+  summarise(fit = median(fit),
+            CI = max(CI)
+            ) %>% 
+  ggplot(aes(x = Jahr, y = fit)) +
+  geom_boxplot(data = mod_tab, aes(Jahr, alpha2, group = Jahr)) +
+  geom_ribbon(aes(ymin = fit-CI, ymax= fit+CI),
+              show.legend = F, fill='grey', alpha=.4) +
+  geom_line(col = "darkred") +
+  theme_bw() +
+  ylab("Störzeiger")
+```
+
+
+Dagegen ist der Zusammenhang zwischen Störzeigern und der Großvieheinheit leicht negativ, aber auch nicht signifikant:
+
+```{r plot7, echo=FALSE}
+#Kommt nicht in die Veröffentlichung:
+pred = get_predictions(fm2b, 
+                       cond = list(GV_proFlaeche = seq(min(mod_tab$GV_proFlaeche, na.rm=T),
+                                            max(mod_tab$GV_proFlaeche, na.rm=T), 
+                                            length.out = 100),
+                                   Ort = unique(mod_tab$Ort),
+                                   se=T), print.summary = F)
+
+pred = pred %>% mutate(alpha2=1)
+
+pred %>% 
+  group_by(GV_proFlaeche) %>% 
+  summarise(fit = median(fit),
+            CI = max(CI)
+            ) %>% 
+  ggplot(aes(x = GV_proFlaeche, y =fit)) +
+  geom_point(data = mod_tab, aes(GV_proFlaeche, alpha2)) +
+  geom_ribbon(aes(ymin = fit-CI, ymax = fit+CI),
+              show.legend = F, fill='grey', alpha=.4) +
+  geom_line(col = "darkred") +
+  theme_bw() +
+  ylab("Störzeiger")
+```
+
+```{r eval=FALSE, include=FALSE}
+gam.check(fm2b) 
+```
+
+## Hypothese Bestände auf trockenen Standorten sind robuster als auch Feuchten
+
+Mit dem Wert der Betadiversität wurde der Unterschied zwischen den Jahren je Probefläche quantifiziert.
+Bei Arttabellen ist es wichtig, dass das Fehlen einer Art auf beiden zu vergleichenden Flächen nicht bedeutet, dass die Flächen dadurch ähnlicher sind. Außerdem sind bei Arttabellen oft die seltenen Arten von höherer Bedeutung als die häufigen. Deswegen wurden die Deckungsgrade logarithmieren. Berechnet wurde die Betadiversität nach der Methode von Bray-Curtis  (Roeland Kindt, 2005).
+Die Betadiversität wurde dann modelliert mit dem Nährstoffgehalt des Standortes und dem Jahr als lineare Prädiktoren. Der Ort wurde als "random Faktor", mit ins Modell genommen.  
+
+
+```{r beta1, include=FALSE}
+mod_tab1 <- mod_tab %>% 
+  dplyr::filter(!is.na(beta1))
+
+f1 <- formula(beta1 ~ ni + Jahr + s(Ort, bs="re"))
+
+fm1 <- gam(f1, data = mod_tab1)
+#summary(fm1)
+#gamtabs(fm1, caption='Zusammenfassung Beta-Diversität Modell')
+```
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{lrrrr}
+   \hline
+A. parametric coefficients & Estimate & Std. Error & t-value & p-value \\ 
+  (Intercept) & 8.1270 & 6.6266 & 1.2264 & 0.2244 \\ 
+  ni & 0.0117 & 0.0065 & 1.8140 & 0.0742 \\ 
+  Jahr & -0.0040 & 0.0033 & -1.2077 & 0.2315 \\ 
+   \hline
+B. smooth terms & edf & Ref.df & F-value & p-value \\ 
+  s(Ort) & 2.2257 & 7.0000 & 0.4701 & 0.1901 \\ 
+   \hline
+\end{tabular}
+\caption{Summary of m1} 
+\label{tab.gam}
+\end{table}
+
+
+###Ergebnisse
+
+Über die Zeit verändert sich die Betadiversität nicht signifikant. Dagegen gibt es einen leichten Anstieg der Betadiversität mit einem feuchteren Standort. Das Bestätigt die Hypothese, dass magere/trockene Standorte robuster in ihrer Artenzusammensetzung sind als die nährstoffreichen/feuchten Standorte. 
+
+
+
+```{r echo=FALSE}
+library(itsadug)
+pred2 = get_predictions(fm1, 
+                       cond = list(ni = seq(min(mod_tab1$ni, na.rm=T),
+                                            max(mod_tab1$ni, na.rm=T), 
+                                            length.out = 100),
+                                   Ort = unique(mod_tab$Ort),
+                                   se=T), print.summary = F)
+
+pred2 = pred2 %>% mutate(beta1=1)
+
+
+pred2 %>% 
+  group_by(ni) %>% 
+  summarise(fit = median(fit),
+            CI = max(CI)
+            ) %>% 
+  ggplot(aes(x = ni, y = fit)) +
+  geom_boxplot(data = mod_tab1, aes(ni, beta1, group = ni)) +
+  geom_ribbon(aes(ymin = fit-CI, ymax=fit+CI),
+              show.legend = F, fill='grey', alpha=.4) +
+  geom_line(col = "darkred") +
+  xlab("Nährstoffgehalt") +
+  ylab("beta-Diversität") +
+  theme_bw()
+
+
+```
+
+
+
+```{r beta3, echo=FALSE}
+
+pred3 = get_predictions(fm1, 
+                       cond = list(Jahr = seq(min(mod_tab1$Jahr, na.rm=T),
+                                            max(mod_tab1$Jahr, na.rm=T), 
+                                            length.out = 100),
+                                   Ort = unique(mod_tab$Ort),
+                                   se=T), print.summary = F)
+
+pred3 = pred3 %>% mutate(beta1=1)
+
+
+pred3 %>% 
+  group_by(Jahr) %>% 
+  summarise(fit = median(fit),
+            CI = max(CI)
+            ) %>% 
+  ggplot(aes(x = Jahr, y = fit)) +
+  geom_boxplot(data = mod_tab1, aes(Jahr, beta1, group = Jahr)) +
+  geom_ribbon(aes(ymin = fit-CI, ymax=fit+CI),
+              show.legend = F, fill='grey', alpha=.4) +
+  geom_line(col = "darkred") +
+  xlab("Jahr") +
+  ylab("beta-Diversität") +
+  theme_bw()
+
+```
+
+
+Die Betadiversität verändert sich über die Jahre nicht in einem deutlichen Trend. In den ersten Jahren des Versuches sinkt sie und steigt dann im Mittel an, und pendelt sich in den späteren Jahren in etwas unter dem Ausgangswert wieder ein. Niedrige Werte bedeuten eine stabile Artenzusammensetzung.
+
+##Analyse von Ungleichheiten in der Vegetation abhängig von der Beweidung:
+
+Hypothese: Die verschiedenen Tierarten haben einen Einfluss auf die Vegetations Zusammensetzung:
+
+copy paste Methode:
+Permutative multivariate Varianzanalyse mit Distanzmatrizen (Adonis):
+
+Die Eingaben sind lineare Prädiktoren und eine Antwortmatrix (Arttabelle) mit einer beliebigen Anzahl von Spalten. Die Adonis stellen sie eine robuste Alternative sowohl zu parametrischem MANOVA als auch zu Ordinationsmethoden dar, um zu beschreiben, wie Variation auf verschiedene experimentelle Behandlungen oder unkontrollierte Kovariablen zurückzuführen ist.
+
+Die Funktion adonis() arbeitet, indem es zuerst die Zentroide für jede Gruppe findet und dann die quadrierten Abweichungen von jedem der Standorte zu diesem Schwerpunkt berechnet. Anschließend werden Signifikanzprüfungen mit F-Tests durchgeführt, die auf sequentiellen Summen von Quadraten aus Permutationen der Rohdaten basieren.
+
+###Ergebnisse:
+
+In der Abbildung sind die Probeflächen nach ihren Ähnlichkeiten in der Artenzusammensetzung in einem zweidimensionalen Raum aufgetragen. Die Jahre sind in unterschiedlichen Symbolen gekennzeichnet. Je größer die die Fläche einer Probefläche ist, desto unterschiedlicher sind die Aufnahmen der einzelnen Jahre. Die Linien markieren den modellierten Index nach Shannon.
+Wie man in der Abbildung sehen kann, ist das Jahr 2018 ein sehr durchschnittliches Jahr. Die  Artzusammensetzung variiert in keiner Probefläche stärker als in den früheren Jahren. Häufig ähnelt sie am stärksten der aus dem Vorjahr 2017, was für eine stabile Situation spricht. Dies steht im Gegensatz zur großen Variabilität des Shannon-Indexes. Das heißt, eine Veränderung der alpha-Diversität und Abundanzverteilung, welche ja durch den Shannon-Index in einem Wert ausgedrückt wird, bedeutet nicht gleich eine Veränderung im Bray-Curtis-Koefizenten. Dieser beschreibt die Veränderung der Arten-Anzahl und Arten-Abundanzen zwischen den Probeflächen und Jahren und ist somit ein Maß der beta-Diversität. Zusammengefasst bedeutet dies, dass auch wenn die Probeflächen eine interne hohe Variabilität der alpha-Diversität haben, sich die beta -Diversität über die Jahre und besonders dieses Jahr immer weiter verkleinert. Somit kann von einer sich stabilisierenden Artzusammensetzung innerhalb der Probeflächen gesprochen werden.
+
+
+```{r nmds, echo=FALSE, fig.height=8, fig.width=9}
+### Ellipsoid hulls show with shannon index
+mod <- vegan::metaMDS(log(treat_art+1), trace = FALSE)
+### Ellipsoid hulls show treatment
+#plot(mod, type = "n")
+vegan::ordisurf(mod, mod_tab$shanno, pch = mod_tab$Jahr-2000, cex = 0.9, col = c("darkgreen", "grey"))
+vegan::ordihull(mod, mod_tab$Ort, label = T, col = "darkred")
+legend("topleft", legend = c(unique(mod_tab$Jahr)), pch = unique(mod_tab$Jahr-2000))
+```
+
+```{r nmds mod, echo=FALSE}
+library(vegan)
+perm <- how(nperm = 5999)
+setBlocks(perm) <- with(variablen, Ort_id)
+plot_adonis <- vegan::adonis2(log(treat_art+1) ~ Hengst + Kälber +
+                                Mutterkuh + Ziege + Zicklein + Hund +
+                                Jungstute_hengst + Stuten + Esel + Schaf,
+                              data = variablen, permutations = perm)
+print(plot_adonis)
+
+```
+
+```{r test, eval=FALSE, include=FALSE}
+#kommt nicht in dei Veröffentlichung
+adon_results<-adonis(log(treat_art+1) ~ mod_tab$Jahr, method="bray",perm=999)
+print(adon_results)
+
+mod2 <- betadisper(beta_div, mod_tab$Jahr)
+boxplot(mod2)
+```
+
+## Korrelation zwischen den Arten
+
+Ergebnisse der Artzusammenhänge (Kapitel 2.3.3)
+
+```{r cor1, echo=FALSE, fig.height=7.5, fig.width=7.5, paged.print=FALSE}
+#Erstellen von einer Matrix mit Zeilen = Arten und Spalten = Arten, -------------
+# in der in jede Zelle der Zusammenhang der Arten aufgetragen
+#treat_art_na <- sapply(treat_art, function(x) ifelse(x == 0, NA, x))
+treat_compl_art <- treat_compl %>% 
+  select(-id, -Jahr, - Ort_id, -Ort, -nutrient, -treat_id)
+
+entmat<-matrix(NA, ncol(treat_compl_art), ncol(treat_compl_art)) 
+#Erstellen von einer  Matrix um jede Art mit jeder zu vergleichen (siehe Forschleife)
+
+help_matrix<-matrix(0, nrow(treat_compl_art), 2)
+
+#L?nge f?r die Forschleife 
+ji<-ncol(treat_compl_art)
+ii<-ncol(treat_compl_art)
+
+for(j in 1:ji){
+  for(i in 1:ii){
+    help_matrix[,1] <-as.matrix(treat_compl_art[,j])
+    help_matrix[,2]<-as.matrix(treat_compl_art[,i])
+    cp12 <- psych::pairwiseCount(help_matrix[,1],
+                                 help_matrix[,2])#z?hlt die Zeilen vollst?ndigen Werten 
+    mat1 <- if(cp12 >=40){cor(help_matrix[,1], 
+                              help_matrix[,2], method = "ken", use = "pairwise.complete.obs")} else{NA} 
+    entmat[j, i] <- mat1
+  }
+}
+
+entmat <- as.data.frame(entmat)
+
+colnames(treat_compl_art) -> colnames(entmat) #Bennenung der Zeilen und Spalten  
+colnames(treat_compl_art) -> row.names(entmat)
+
+entmat11 <- entmat %>%
+  select_if(~sum(!is.na(.)) > 0)
+
+entmat12 <- entmat11[rowSums(is.na(entmat11)) != ncol(entmat11), ]
+
+entmat12[lower.tri(entmat12)] <- NA
+
+import_names <- c("Arrhenatherum.elatius", "Anthoxanthum.odoratum", "Rumex.acetosa", "Poa.pratensis", "Lychnis.flos.cuculi", "Luzula.campestris", "Festuca.rubra", "Leontodon.hispidus", "Lotus.corniculatus", "Leucanthemum.ircutianum")
+entmat13 <- as.matrix(entmat12) %>% 
+  reshape2::melt() %>% 
+  filter(Var2 %in% import_names) %>% 
+  filter(Var1 %in% import_names) %>% 
+  na.omit()
+
+labe_mat <- entmat13 %>% 
+  filter(value < .8) %>% 
+  filter(value >= .25 | value <= -.25)
+ggplot(data = entmat13, aes(Var2, Var1, fill = value))+
+  geom_tile(color = "white")+
+  geom_text(data = labe_mat, aes(label = round(value, 2)), size = 2.5) +
+  scale_fill_gradient2(low = "darkred", high = "yellow", name="Kendall\nCorrelation") +
+  theme_minimal()+ 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                   size = 12, hjust = 1),
+        axis.title = element_blank())+
+  coord_fixed()
+```
+
+#Diskussion
